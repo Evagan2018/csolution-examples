@@ -1,8 +1,5 @@
 cbuild-pack:
   resolved-packs:
-    - resolved-pack: ARM::CMSIS@6.1.0
-      selected-by-pack:
-        - ARM::CMSIS@^6.1.0
     - resolved-pack: ARM::CMSIS-RTX@5.9.0
       selected-by-pack:
         - ARM::CMSIS-RTX@^5.9.0

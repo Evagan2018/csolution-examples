@@ -9,7 +9,7 @@ solution:
   packs:
     - pack: MyVendor::MyDevice_DFP    # replace with matching device family pack (DFP) for the device
 #   - pack: MyVendor::MyBoard_BSP     # add a board support pack (BSP) when using a board
-    - pack: ARM::CMSIS@^6.1.0         # pack shared by all projects in this solution
+    - pack: ARM::CMSIS@6.4.0
 
 # List different hardware targets that are used to deploy the solution
   target-types:

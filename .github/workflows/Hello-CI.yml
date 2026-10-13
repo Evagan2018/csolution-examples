@@ -1,72 +1,210 @@
-name: "Hello: Test Build and Execution"
-
-on:
-  workflow_dispatch:
-  pull_request:
-    branches: [main]
-    paths:
-      - Hello/**
-      - .github/workflows/Hello-CI.yml
-  push:
-    branches: [main]
-    paths:
-      - Hello/**
-      - .github/workflows/Hello-CI.yml
-  schedule:
-    - cron: '00 20 * * 6'
-
+name: 'Hello: Test Build and Execution'
+'on':
+  workflow_dispatch: null
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 permissions: read-all
-
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        toolchain: [AC6, GCC, CLANG]
-        build_type: [Debug, Release]
-
+        toolchain:
+        - AC6
+        - GCC
+        - CLANG
+        build_type:
+        - Debug
+        - Release
+      fail-fast: false
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7.0.1
+    - name: Checkout repo
+      uses: actions/checkout@v7.0.1
+      with:
+        repository: Evagan2018/csolution-examples
+        ref: cmsis-pack-6.4.0-test-20261013-083944
+    - name: Install tools
+      uses: ARM-software/cmsis-actions/vcpkg@v1.3
+      with:
+        config: .ci/vcpkg-configuration.json
+    - name: Activate Arm tool license
+      uses: ARM-software/cmsis-actions/armlm@v1.3
+    - name: Set up Python
+      uses: actions/setup-python@v7.0.0
+      with:
+        python-version: '3.14'
+    - name: Install CMSIS 6.4.0 qualification probe
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/cmsis-pack-test"
+        cat > "$RUNNER_TEMP/cmsis-pack-test/probe.py" <<'CMSIS_PROBE_EOF'
+        #!/usr/bin/env python3
+        """Ephemeral runner instrumentation for the CMSIS 6.4.0 campaign (stdlib only)."""
+        import json, os, re, shutil, subprocess, sys, time, hashlib
+        from pathlib import Path
 
-      - name: Install tools
-        uses: ARM-software/cmsis-actions/vcpkg@v1.3
-        with:
-          config: ".ci/vcpkg-configuration.json"
+        TARGET = 'ARM::CMSIS@6.4.0'
+        HOME = Path(os.environ.get('RUNNER_TEMP', '.')) / 'cmsis-pack-test'
+        WORKSPACE = Path(os.environ.get('GITHUB_WORKSPACE', '.')).resolve()
+        SKIP = {'.git', '.packs', '.Download', 'node_modules', 'boost_1_84_0'}
 
-      - name: Activate Arm tool license
-        uses: ARM-software/cmsis-actions/armlm@v1.3
+        def files(root=WORKSPACE):
+            for base, dirs, names in os.walk(root):
+                dirs[:] = [d for d in dirs if d not in SKIP and not Path(base, d).is_symlink()]
+                for name in names:
+                    if name.endswith(('.yml', '.yaml')):
+                        yield Path(base, name)
 
-      - name: Set up Python
-        uses: actions/setup-python@v7.0.0
-        with:
-          python-version: '3.14'
+        def pin(text, lock=False):
+            lines = text.splitlines(keepends=True)
+            result = []
+            i = 0
+            key = 'resolved-pack' if lock else 'pack'
+            pattern = re.compile(r'^(\s*)-\s+' + key + r':\s*[\"\x27]?ARM::CMSIS(?=[@\s\"\x27]|$)', re.I)
+            while i < len(lines):
+                match = pattern.match(lines[i])
+                if not match:
+                    result.append(lines[i]); i += 1; continue
+                indent = len(match[1])
+                j = i + 1
+                while j < len(lines):
+                    line = lines[j]
+                    if line.strip() and not line.lstrip().startswith('#') and len(line) - len(line.lstrip()) <= indent:
+                        break
+                    j += 1
+                if not lock:
+                    result.append(match[1] + '- pack: ' + TARGET + '\n')
+                    result.extend(x for x in lines[i+1:j] if not re.match(r'^\s+path:', x))
+                i = j
+            return ''.join(result)
 
-      - name: Build Hello with ${{ matrix.toolchain }}
-        working-directory: ./Hello/
-        run: |
-          echo "Building with toolchain: ${{ matrix.toolchain }}"
-          cbuild Hello.csolution.yml --packs --toolchain ${{ matrix.toolchain }}
+        def prepare():
+            changed = []
+            for path in files():
+                if not path.name.endswith(('.csolution.yml', '.cproject.yml', '.clayer.yml', '.cbuild-pack.yml')):
+                    continue
+                old = path.read_text(encoding='utf-8-sig')
+                new = pin(old, path.name.endswith('.cbuild-pack.yml'))
+                if old != new:
+                    path.write_text(new, encoding='utf-8')
+                    changed.append(str(path.relative_to(WORKSPACE)))
+            return changed
 
-      - name: Run Hello Simulation ${{ matrix.toolchain }}-${{ matrix.build_type }}
-        working-directory: ./Hello/
-        run: |
-          # Determine file extension
-          EXT="elf"
-          if [[ "${{ matrix.toolchain }}" == "AC6" ]]; then EXT="axf"; fi
+        def emit(record):
+            HOME.mkdir(parents=True, exist_ok=True)
+            with (HOME/'evidence.jsonl').open('a', encoding='utf-8') as f:
+                f.write(json.dumps(record) + '\n')
+            print('CMSIS_PACK_TEST_RESULT ' + json.dumps(record), flush=True)
 
-          EXEC=./out/Hello/CS300/${{ matrix.build_type }}/Hello.${EXT}
-          LOG=./out/Hello/CS300/${{ matrix.build_type }}/${{ matrix.toolchain }}_fvp_stdout.log
+        def wrapper():
+            args = sys.argv[1:]
+            real = (HOME/'real-cbuild.txt').read_text().strip()
+            if not any('.csolution.' in a for a in args) or any(a in args for a in ['--help', '--version', 'list', 'clean']):
+                return subprocess.call([real] + args)
+            changed = prepare()
+            def option(*names):
+                return next((args[i+1] for i,a in enumerate(args[:-1]) if a in names), '')
+            identity = json.dumps([str(Path.cwd()), next(a for a in args if '.csolution.' in a),
+                                   option('-c','--context'),option('--toolchain'),option('--active'),option('-O','--output')])
+            known_path=HOME/('known-'+hashlib.sha256(identity.encode()).hexdigest()+'.json')
+            known=json.loads(known_path.read_text()) if known_path.exists() else {}
+            before = {str(p): p.stat().st_mtime_ns for p in files() if p.name.endswith('.cbuild.yml')}
+            started = time.time()
+            rc = subprocess.call([real] + args)
+            evidence = []; current={}
+            for p in files():
+                if not p.name.endswith('.cbuild.yml'):
+                    continue
+                text = p.read_text(encoding='utf-8-sig')
+                digest=hashlib.sha256(text.encode()).hexdigest()
+                fresh=before.get(str(p)) != p.stat().st_mtime_ns
+                if not fresh and known.get(str(p))!=digest:
+                    continue
+                packs = sorted(set(re.findall(r'(?:pack|from-pack):\s*[\"\x27]?(ARM::CMSIS@[^\s\"\x27]+)', text)))
+                if packs:
+                    ctx = re.search(r'^\s*context:\s*(.+)$', text, re.M)
+                    evidence.append({'file':str(p.relative_to(WORKSPACE)), 'context':ctx[1].strip() if ctx else p.name,
+                                     'packs':packs, 'verified':packs == [TARGET],
+                                     'metadata':'newly written' if fresh else 'unchanged; same solution/context/toolchain invocation'})
+                    current[str(p)]=digest
+            known_path.write_text(json.dumps(current))
+            build_action = not any(a in args for a in ['setup', 'convert'])
+            good = bool(evidence) and all(e['verified'] for e in evidence)
+            record = {'kind':'build' if build_action else 'setup','cwd':str(Path.cwd()),'args':args,
+                      'returncode':rc,'version_verified':good,'contexts':evidence,'patched_inputs':changed,
+                      'seconds':round(time.time()-started,2)}
+            emit(record)
+            # Preserve the builder return code. The always-run final check separately rejects
+            # missing/wrong evidence and failures swallowed by upstream scripts.
+            return rc
 
-          FVP_Corstone_SSE-300 \
-            -a $EXEC \
-            -f ./../FVP/FVP_Corstone_SSE-300/fvp_config.txt \
-            -C mps3_board.uart0.out_file=$LOG \
-            --simlimit 10 --stat
+        def install():
+            HOME.mkdir(parents=True, exist_ok=True)
+            prepare()
+            bindir = HOME/'bin'; bindir.mkdir(exist_ok=True)
+            if not (HOME/'real-cbuild.txt').exists():
+                real = shutil.which('cbuild')
+                if not real:
+                    raise RuntimeError('cbuild unavailable at qualification setup')
+                (HOME/'real-cbuild.txt').write_text(real)
+                wrapper_path = bindir/'cbuild'
+                wrapper_path.write_text('#!/bin/sh\nexec python3 "' + str(HOME/'probe.py') + '" "$@"\n')
+                wrapper_path.chmod(0o755)
+                with open(os.environ['GITHUB_PATH'], 'a') as f:
+                    f.write(str(bindir)+'\n')
+            print('CMSIS_PACK_TEST_SETUP target=' + TARGET, flush=True)
 
-          echo "Show simulation UART output for ${{ matrix.toolchain }} ${{ matrix.build_type }}"
-          cat $LOG
+        def finish():
+            path = HOME/'evidence.jsonl'
+            if not path.exists():
+                print('::error::No instrumented cbuild invocation reached; CMSIS 6.4.0 not verified')
+                return 1
+            records = [json.loads(line) for line in path.read_text().splitlines() if line]
+            for r in records:
+                print('CMSIS_PACK_TEST_FINAL ' + json.dumps(r), flush=True)
+            builds = [r for r in records if r['kind']=='build']
+            good = bool(builds) and all(r['returncode']==0 and r['version_verified'] for r in builds)
+            print('CMSIS_PACK_TEST_GATE ' + json.dumps({'passed':good,'build_invocations':len(builds)}))
+            return 0 if good else 1
+
+        if __name__ == '__main__':
+            if sys.argv[1:] == ['--probe-install']:
+                install()
+            elif sys.argv[1:] == ['--probe-finish']:
+                sys.exit(finish())
+            else:
+                sys.exit(wrapper())
+
+        CMSIS_PROBE_EOF
+        python3 "$RUNNER_TEMP/cmsis-pack-test/probe.py" --probe-install
+    - name: Build Hello with ${{ matrix.toolchain }}
+      working-directory: ./Hello/
+      run: |
+        echo "Building with toolchain: ${{ matrix.toolchain }}"
+        cbuild Hello.csolution.yml --packs --toolchain ${{ matrix.toolchain }}
+    - name: Run Hello Simulation ${{ matrix.toolchain }}-${{ matrix.build_type }}
+      working-directory: ./Hello/
+      run: |
+        # Determine file extension
+        EXT="elf"
+        if [[ "${{ matrix.toolchain }}" == "AC6" ]]; then EXT="axf"; fi
+
+        EXEC=./out/Hello/CS300/${{ matrix.build_type }}/Hello.${EXT}
+        LOG=./out/Hello/CS300/${{ matrix.build_type }}/${{ matrix.toolchain }}_fvp_stdout.log
+
+        FVP_Corstone_SSE-300 \
+          -a $EXEC \
+          -f ./../FVP/FVP_Corstone_SSE-300/fvp_config.txt \
+          -C mps3_board.uart0.out_file=$LOG \
+          --simlimit 10 --stat
+
+        echo "Show simulation UART output for ${{ matrix.toolchain }} ${{ matrix.build_type }}"
+        cat $LOG
+    - name: Verify CMSIS 6.4.0 build evidence
+      if: always()
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: python3 "$RUNNER_TEMP/cmsis-pack-test/probe.py" --probe-finish
+run-name: CMSIS 6.4.0 qualification - Hello-CI.yml

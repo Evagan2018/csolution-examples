@@ -3,7 +3,7 @@ layer:
 
 # List packs required by this reusable layer
   packs:
-    - pack: ARM::CMSIS@^6.1.0  # provides the CMSIS:CORE component used by this layer
+    - pack: ARM::CMSIS@6.4.0
 #   - pack: MyVendor::MyHALPack
 
   groups:

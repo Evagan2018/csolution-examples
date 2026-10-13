@@ -12,7 +12,7 @@ solution:
 
   # It is recommended to list the pack or packs that define the device or board used in the csolution.yml file
   packs:
-    - pack: ARM::CMSIS
+    - pack: ARM::CMSIS@6.4.0
     - pack: ARM::CMSIS-RTX
     - pack: ARM::V2M_MPS3_SSE_300_BSP          # Corstone-300 (Cortex-M55)
     - pack: ARM::CMSIS-Compiler                # For retargeting stdout to UART
